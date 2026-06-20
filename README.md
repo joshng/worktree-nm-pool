@@ -12,13 +12,14 @@ a root-resolution error. The worktree needs a real directory. But running a
 full `npm ci` / `bun install` for every throwaway worktree is slow and wastes
 gigabytes.
 
-`worktree-nm-pool` keeps a pool of `node_modules` directories keyed by lockfile
-hash at `<repo-main-root>/.node_modules_cache/`. Provisioning a worktree is an
-`os.rename` from the pool into the worktree — atomic and O(1) when they share a
-volume (which all worktrees of a repo do). When a worktree is removed, its
-`node_modules` is moved back into the pool for reuse. An LRU cap (12 entries)
-bounds disk use. Because the lockfile both pins the dependency tree and implies
-the package manager, its hash is the correct cache identity.
+`worktree-nm-pool` keeps a single **global** pool of `node_modules` directories
+keyed by lockfile hash (default `$XDG_CACHE_HOME/nmpool`). Provisioning a
+worktree is an `os.rename` from the pool into the worktree — atomic and O(1)
+when they share a volume. When a worktree is removed, its `node_modules` is
+moved back into the pool for reuse. A **total-bytes budget** (default 25 GiB)
+bounds disk use across *all* projects via LRU eviction. Because the lockfile
+both pins the dependency tree and implies the package manager, its hash is the
+correct cache identity — so two clones of a repo share pooled trees.
 
 ## The tool: `bin/nmpool`
 
@@ -28,29 +29,43 @@ depend on `node_modules` or any pip package.
 ```bash
 nmpool install   [--worktree PATH]   # provision: pool hit via mv, else frozen install
 nmpool uninstall [--worktree PATH]   # return node_modules to the pool, then gc
-nmpool gc        [--worktree PATH]   # enforce LRU cap (12) + prune dirty entries
+nmpool gc                            # evict LRU beyond the byte budget + prune dirty
 nmpool --help
 ```
 
-- **Pool root:** `dirname(git rev-parse --git-common-dir)` + `/.node_modules_cache/`
-  (the primary worktree's root, shared by all worktrees of the repo).
+- **Pool:** one global dir (default `$XDG_CACHE_HOME/nmpool`, else `~/.cache/nmpool`),
+  outside every repo — so there is nothing to gitignore.
 - **Identity:** `sha256(<lockfile bytes>).hexdigest()[:16]`.
 - **Lockfile priority:** `bun.lock` → `bun.lockb` → `pnpm-lock.yaml` →
   `package-lock.json` → `yarn.lock`. The detected lockfile selects the install
   command (`bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`,
   `npm ci`, `yarn install --immutable`).
-- **Pool entry:** `node_modules_<hash>_<slug>` (`slug` = `secrets.token_hex(4)`),
-  so multiple worktrees can share a hash. Each holds a `.nmpool-hash` sentinel.
+- **Pool entry:** `node_modules_<hash>_<slug>_<bytes>` (`slug` =
+  `secrets.token_hex(4)`; `bytes` = measured tree size, so `gc` reads sizes from
+  names without re-walking). Each holds a `.nmpool-hash` sentinel.
 - **No locks:** claiming from the pool is atomic `os.rename` + retry on the next
   candidate if another worktree raced and grabbed it. Cross-volume pools
-  (`EXDEV`) fall back to a real install with a warning.
+  (`EXDEV`) fall back to a real install with a warning (set `NMPOOL_CACHE_DIR`
+  to a path on the worktree's volume to enable pooling there).
 
 `install` is idempotent — a real `node_modules` whose sentinel matches the
-lockfile is a fast no-op (stat + one file read; no install runs).
+lockfile is a fast no-op (stat + one file read; no install runs). A lockfile
+that drifts under an existing worktree is reconciled **in place** (the package
+manager evolves the tree), not via the pool.
 
-The tool ignores the pool via git's per-clone `<git-common-dir>/info/exclude`
-(idempotently) rather than the tracked `.gitignore` — so no project-tracked
-file is touched, and the single write covers every worktree of the repo.
+## Configuration
+
+Resolved **env var → config file → default**, where the config file is
+`$XDG_CONFIG_HOME/nmpool/config.json` (else `~/.config/nmpool/config.json`):
+
+| Setting | Env var | Config key | Default |
+|---|---|---|---|
+| Pool location | `NMPOOL_CACHE_DIR` | `cacheDir` | `$XDG_CACHE_HOME/nmpool` |
+| Total-bytes budget | `NMPOOL_MAX_BYTES` | `maxCacheBytes` | `26843545600` (25 GiB) |
+
+```json
+{ "cacheDir": "/mnt/fast/nmpool", "maxCacheBytes": 53687091200 }
+```
 
 ## Plugin / hook auto-wiring
 
@@ -69,14 +84,23 @@ file is touched, and the single write covers every worktree of the repo.
 Hook scripts resolve the tool via `${CLAUDE_PLUGIN_ROOT}/bin/nmpool`, falling
 back to a path relative to the script's own location.
 
-## Install (local dev)
+## Install
+
+Globally, via the plugin marketplace (in a Claude Code session):
+
+```
+/plugin marketplace add joshng/worktree-nm-pool
+/plugin install worktree-nm-pool@joshng
+```
+
+For local development (ephemeral, reads the working tree directly):
 
 ```bash
 claude --plugin-dir /path/to/worktree-nm-pool
 ```
 
-Add `bin/` to your PATH (the plugin's `bin/` is auto-added to the Bash tool's
-PATH while enabled) to call `nmpool` directly.
+When the plugin is enabled its `bin/` is auto-added to the Bash tool's PATH, so
+`nmpool` resolves directly.
 
 ## Test
 
