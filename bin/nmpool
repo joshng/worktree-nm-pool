@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""nmpool — pool git-worktree node_modules directories.
+
+Worktrees need a REAL node_modules (not a symlink — Next/Turbopack rejects
+out-of-root node_modules symlinks). Re-installing 1-2 GB per worktree is
+wasteful, so this tool pools node_modules dirs keyed by lockfile hash and
+moves them between the pool and worktrees with an O(1) atomic rename
+(assuming pool + worktree share a volume).
+
+PURE PYTHON 3 STDLIB. This tool *creates* node_modules, so it must never
+depend on node_modules or any pip package.
+"""
+
+import argparse
+import errno
+import glob
+import hashlib
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+
+POOL_DIRNAME = ".node_modules_cache"
+SENTINEL = ".nmpool-hash"
+POOL_CAP = 12
+
+# Lockfile -> (install argv). Priority order matters: first match wins.
+LOCKFILES = [
+    ("bun.lock", ["bun", "install", "--frozen-lockfile"]),
+    ("bun.lockb", ["bun", "install", "--frozen-lockfile"]),
+    ("pnpm-lock.yaml", ["pnpm", "install", "--frozen-lockfile"]),
+    ("package-lock.json", ["npm", "ci"]),
+    ("yarn.lock", ["yarn", "install", "--immutable"]),
+]
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def out(msg):
+    print(msg)
+
+
+# ---------------------------------------------------------------------------
+# git / path helpers
+# ---------------------------------------------------------------------------
+
+def _git(args, cwd):
+    res = subprocess.run(
+        ["git"] + args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            "git %s failed: %s" % (" ".join(args), res.stderr.strip())
+        )
+    return res.stdout.strip()
+
+
+def worktree_root(path):
+    """Top-level of the git worktree enclosing `path`."""
+    return os.path.realpath(_git(["rev-parse", "--show-toplevel"], cwd=path))
+
+
+def repo_main_root(path):
+    """Primary worktree root: parent of git-common-dir (shared by all worktrees)."""
+    common = _git(["rev-parse", "--git-common-dir"], cwd=path)
+    common = os.path.realpath(os.path.join(path, common))
+    return os.path.dirname(common)
+
+
+def pool_dir(main_root):
+    return os.path.join(main_root, POOL_DIRNAME)
+
+
+# ---------------------------------------------------------------------------
+# lockfile detection + hashing
+# ---------------------------------------------------------------------------
+
+def detect_lockfile(wt):
+    for name, install_cmd in LOCKFILES:
+        p = os.path.join(wt, name)
+        if os.path.isfile(p):
+            return p, install_cmd
+    raise RuntimeError(
+        "no lockfile found in %s (looked for: %s)"
+        % (wt, ", ".join(n for n, _ in LOCKFILES))
+    )
+
+
+def lockfile_hash(lockfile_path):
+    with open(lockfile_path, "rb") as f:
+        data = f.read()
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def read_sentinel(nm_dir):
+    p = os.path.join(nm_dir, SENTINEL)
+    try:
+        with open(p, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def write_sentinel(nm_dir, h):
+    with open(os.path.join(nm_dir, SENTINEL), "w") as f:
+        f.write(h + "\n")
+
+
+# ---------------------------------------------------------------------------
+# gitignore
+# ---------------------------------------------------------------------------
+
+def ensure_gitignored(main_root):
+    """Idempotently ensure the pool dir is gitignored in the main root."""
+    gi = os.path.join(main_root, ".gitignore")
+    entry = POOL_DIRNAME + "/"
+    try:
+        with open(gi, "r") as f:
+            lines = [ln.strip() for ln in f.readlines()]
+        if entry in lines or POOL_DIRNAME in lines:
+            return
+        with open(gi, "a") as f:
+            f.write("\n# worktree-nm-pool cache\n" + entry + "\n")
+    except FileNotFoundError:
+        with open(gi, "w") as f:
+            f.write("# worktree-nm-pool cache\n" + entry + "\n")
+
+
+# ---------------------------------------------------------------------------
+# install seam (test-only fake)
+# ---------------------------------------------------------------------------
+
+def run_install(wt, install_cmd, h):
+    """Run the package manager's frozen install in the worktree.
+
+    Test seam: NMPOOL_FAKE_INSTALL=1 fabricates a tiny node_modules instead of
+    invoking a real package manager. Gated so it never affects real use.
+    """
+    nm = os.path.join(wt, "node_modules")
+    if os.environ.get("NMPOOL_FAKE_INSTALL") == "1":
+        os.makedirs(nm, exist_ok=True)
+        with open(os.path.join(nm, ".fake-install-marker"), "w") as f:
+            f.write("fake install for %s\n" % h)
+        return
+    res = subprocess.run(install_cmd, cwd=wt)
+    if res.returncode != 0:
+        raise RuntimeError("install failed: %s" % " ".join(install_cmd))
+
+
+# ---------------------------------------------------------------------------
+# pool removal / return helpers
+# ---------------------------------------------------------------------------
+
+def _rmtree(path):
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def return_to_pool(nm_dir, pool, h):
+    """Atomically move a valid node_modules into the pool. Sets mtime=now."""
+    os.makedirs(pool, exist_ok=True)
+    slug = secrets.token_hex(4)
+    dest = os.path.join(pool, "node_modules_%s_%s" % (h, slug))
+    os.rename(nm_dir, dest)
+    now = time.time()
+    os.utime(dest, (now, now))
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+def cmd_install(args):
+    target = os.path.abspath(args.worktree or os.getcwd())
+    wt = worktree_root(target)
+    main_root = repo_main_root(wt)
+    pool = pool_dir(main_root)
+    ensure_gitignored(main_root)
+
+    lockfile, install_cmd = detect_lockfile(wt)
+    h = lockfile_hash(lockfile)
+    nm = os.path.join(wt, "node_modules")
+
+    # Fast no-op: real dir with matching sentinel.
+    if os.path.isdir(nm) and not os.path.islink(nm):
+        if read_sentinel(nm) == h:
+            out("no-op (matches %s)" % h)
+            return 0
+
+    # Clear whatever is currently at node_modules.
+    if os.path.islink(nm):
+        os.unlink(nm)
+    elif os.path.isdir(nm):
+        existing = read_sentinel(nm)
+        if existing == h:
+            # Real dir, valid, matches — but we returned above. Defensive.
+            out("no-op (matches %s)" % h)
+            return 0
+        if existing and existing != h:
+            # Valid but stale: return it to the pool for reuse.
+            dest = return_to_pool(nm, pool, existing)
+            out("returned stale node_modules to pool (%s)" % os.path.basename(dest))
+        else:
+            # Dirty / no sentinel: discard.
+            _rmtree(nm)
+            out("removed dirty node_modules (no/!sentinel)")
+    elif os.path.exists(nm):
+        # A plain file occupying the name.
+        os.unlink(nm)
+
+    # Claim from pool: atomic rename + retry on race.
+    candidates = sorted(glob.glob(os.path.join(pool, "node_modules_%s_*" % h)))
+    for cand in candidates:
+        try:
+            os.rename(cand, nm)
+        except FileNotFoundError:
+            continue  # another worktree grabbed it; try next
+        except OSError as e:
+            if e.errno == errno.EXDEV:
+                eprint("warn: pool on different volume than worktree; "
+                       "falling back to install")
+                break
+            raise
+        # claimed — verify identity
+        if read_sentinel(nm) == h:
+            out("pool hit (mv %s)" % os.path.basename(cand))
+            return 0
+        # mismatched sentinel inside a supposedly-matching entry: discard
+        _rmtree(nm)
+
+    # Pool miss (or EXDEV fallback): install in place.
+    pm = install_cmd[0]
+    out("pool miss -> %s install" % pm)
+    run_install(wt, install_cmd, h)
+    write_sentinel(nm, h)
+    out("installed + sentinel written (%s)" % h)
+    return 0
+
+
+def cmd_uninstall(args):
+    target = os.path.abspath(args.worktree or os.getcwd())
+    wt = worktree_root(target)
+    main_root = repo_main_root(wt)
+    pool = pool_dir(main_root)
+    nm = os.path.join(wt, "node_modules")
+
+    if os.path.islink(nm):
+        os.unlink(nm)
+        out("removed symlink (not pooled)")
+    elif os.path.isdir(nm):
+        sentinel = read_sentinel(nm)
+        h_ok = None
+        # Validate sentinel against the worktree's current lockfile when present.
+        try:
+            lockfile, _ = detect_lockfile(wt)
+            h_ok = lockfile_hash(lockfile)
+        except RuntimeError:
+            h_ok = None
+        if sentinel and (h_ok is None or sentinel == h_ok):
+            dest = return_to_pool(nm, pool, sentinel)
+            out("returned to pool (%s)" % os.path.basename(dest))
+        else:
+            _rmtree(nm)
+            out("removed dirty/mismatched node_modules (not pooled)")
+    else:
+        out("no-op (no node_modules)")
+
+    _gc(pool)
+    return 0
+
+
+def _gc(pool):
+    if not os.path.isdir(pool):
+        return 0
+    entries = []
+    evicted_dirty = 0
+    for name in os.listdir(pool):
+        p = os.path.join(pool, name)
+        if not os.path.isdir(p) or not name.startswith("node_modules_"):
+            continue
+        # Expected name: node_modules_<hash>_<slug>
+        parts = name.split("_")
+        expected_hash = parts[2] if len(parts) >= 4 else None
+        sentinel = read_sentinel(p)
+        if not sentinel or (expected_hash and sentinel != expected_hash):
+            _rmtree(p)
+            evicted_dirty += 1
+            continue
+        try:
+            mtime = os.path.getmtime(p)
+        except OSError:
+            mtime = 0
+        entries.append((mtime, p))
+
+    evicted_lru = 0
+    if len(entries) > POOL_CAP:
+        entries.sort()  # oldest first
+        for _, p in entries[: len(entries) - POOL_CAP]:
+            _rmtree(p)
+            evicted_lru += 1
+
+    if evicted_dirty or evicted_lru:
+        out("gc: evicted %d LRU, pruned %d dirty (cap %d)"
+            % (evicted_lru, evicted_dirty, POOL_CAP))
+    return 0
+
+
+def cmd_gc(args):
+    target = os.path.abspath(args.worktree or os.getcwd())
+    wt = worktree_root(target)
+    main_root = repo_main_root(wt)
+    return _gc(pool_dir(main_root))
+
+
+# ---------------------------------------------------------------------------
+# entrypoint
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="nmpool",
+        description=(
+            "Pool git-worktree node_modules directories. Worktrees get a real "
+            "node_modules (no symlink) via O(1) atomic moves keyed by lockfile "
+            "hash, instead of re-installing per worktree."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Pool location: <repo-main-root>/.node_modules_cache/ (shared by all\n"
+            "worktrees of the repo). Identity = sha256(lockfile)[:16]. Lockfile\n"
+            "priority: bun.lock > bun.lockb > pnpm-lock.yaml > package-lock.json\n"
+            "> yarn.lock. LRU cap: %d entries.\n\n"
+            "Commands:\n"
+            "  install    provision node_modules (pool hit via mv, else install)\n"
+            "  uninstall  return node_modules to the pool (then gc)\n"
+            "  gc         enforce the LRU cap + prune dirty entries\n"
+            % POOL_CAP
+        ),
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    pi = sub.add_parser("install", help="provision node_modules (idempotent)")
+    pi.add_argument("--worktree", help="worktree path (default: cwd)")
+    pi.set_defaults(func=cmd_install)
+
+    pu = sub.add_parser("uninstall", help="return node_modules to the pool")
+    pu.add_argument("--worktree", help="worktree path (default: cwd)")
+    pu.set_defaults(func=cmd_uninstall)
+
+    pg = sub.add_parser("gc", help="enforce LRU cap + prune dirty entries")
+    pg.add_argument("--worktree", help="worktree path (default: cwd)")
+    pg.set_defaults(func=cmd_gc)
+
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args) or 0
+    except Exception as e:  # noqa: BLE001 — top-level: report + nonzero exit
+        eprint("nmpool: error: %s" % e)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

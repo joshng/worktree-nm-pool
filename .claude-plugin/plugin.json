@@ -1,0 +1,8 @@
+{
+  "name": "worktree-nm-pool",
+  "version": "0.1.0",
+  "description": "Pools git-worktree node_modules directories: worktrees get a real node_modules (no symlink, so Next/Turbopack is happy) via O(1) atomic moves keyed by lockfile hash, instead of re-installing 1-2 GB per worktree.",
+  "author": {
+    "name": "Josh Gruenberg"
+  }
+}
