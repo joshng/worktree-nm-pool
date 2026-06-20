@@ -48,6 +48,10 @@ echo "    -> $out1"
 [ "$(cat "$REPO/node_modules/.nmpool-hash")" = "$HASH" ]; check "sentinel matches hash" $?
 echo "$out1" | grep -q "pool miss"; check "reported pool miss" $?
 
+echo "== case 1b: pool ignored via .git/info/exclude, .gitignore untouched =="
+grep -q '^\.node_modules_cache/$' "$REPO/.git/info/exclude"; check "pool dir listed in .git/info/exclude" $?
+{ [ ! -f "$REPO/.gitignore" ] || ! grep -q "node_modules_cache" "$REPO/.gitignore"; }; check ".gitignore not modified" $?
+
 echo "== case 2: install again is a no-op (no install) =="
 out2="$(nm install --worktree "$REPO")"
 echo "    -> $out2"

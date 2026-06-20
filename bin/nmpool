@@ -67,11 +67,15 @@ def worktree_root(path):
     return os.path.realpath(_git(["rev-parse", "--show-toplevel"], cwd=path))
 
 
+def git_common_dir(path):
+    """The git common dir (shared by all worktrees of the repo)."""
+    common = _git(["rev-parse", "--git-common-dir"], cwd=path)
+    return os.path.realpath(os.path.join(path, common))
+
+
 def repo_main_root(path):
     """Primary worktree root: parent of git-common-dir (shared by all worktrees)."""
-    common = _git(["rev-parse", "--git-common-dir"], cwd=path)
-    common = os.path.realpath(os.path.join(path, common))
-    return os.path.dirname(common)
+    return os.path.dirname(git_common_dir(path))
 
 
 def pool_dir(main_root):
@@ -114,22 +118,29 @@ def write_sentinel(nm_dir, h):
 
 
 # ---------------------------------------------------------------------------
-# gitignore
+# ignore (git per-clone info/exclude — no tracked file is touched)
 # ---------------------------------------------------------------------------
 
-def ensure_gitignored(main_root):
-    """Idempotently ensure the pool dir is gitignored in the main root."""
-    gi = os.path.join(main_root, ".gitignore")
+def ensure_ignored(common_dir):
+    """Idempotently ignore the pool dir via git's per-clone info/exclude.
+
+    Uses <git-common-dir>/info/exclude rather than the tracked .gitignore, so no
+    project-tracked file is modified. info/exclude lives in the common dir, so a
+    single write covers every worktree of the repo and is never committed.
+    """
+    info = os.path.join(common_dir, "info")
+    os.makedirs(info, exist_ok=True)
+    exclude = os.path.join(info, "exclude")
     entry = POOL_DIRNAME + "/"
     try:
-        with open(gi, "r") as f:
+        with open(exclude, "r") as f:
             lines = [ln.strip() for ln in f.readlines()]
         if entry in lines or POOL_DIRNAME in lines:
             return
-        with open(gi, "a") as f:
+        with open(exclude, "a") as f:
             f.write("\n# worktree-nm-pool cache\n" + entry + "\n")
     except FileNotFoundError:
-        with open(gi, "w") as f:
+        with open(exclude, "w") as f:
             f.write("# worktree-nm-pool cache\n" + entry + "\n")
 
 
@@ -180,9 +191,10 @@ def return_to_pool(nm_dir, pool, h):
 def cmd_install(args):
     target = os.path.abspath(args.worktree or os.getcwd())
     wt = worktree_root(target)
-    main_root = repo_main_root(wt)
+    common = git_common_dir(wt)
+    main_root = os.path.dirname(common)
     pool = pool_dir(main_root)
-    ensure_gitignored(main_root)
+    ensure_ignored(common)
 
     lockfile, install_cmd = detect_lockfile(wt)
     h = lockfile_hash(lockfile)

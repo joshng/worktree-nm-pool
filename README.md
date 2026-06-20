@@ -48,8 +48,9 @@ nmpool --help
 `install` is idempotent — a real `node_modules` whose sentinel matches the
 lockfile is a fast no-op (stat + one file read; no install runs).
 
-The tool appends `.node_modules_cache/` to the repo-main-root `.gitignore`
-idempotently.
+The tool ignores the pool via git's per-clone `<git-common-dir>/info/exclude`
+(idempotently) rather than the tracked `.gitignore` — so no project-tracked
+file is touched, and the single write covers every worktree of the repo.
 
 ## Plugin / hook auto-wiring
 
