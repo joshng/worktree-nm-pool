@@ -1,9 +1,9 @@
 {
-  "name": "worktree-nm-pool-plugins",
+  "name": "joshng",
   "owner": {
     "name": "Josh Gruenberg"
   },
-  "description": "Local marketplace for the worktree-nm-pool plugin.",
+  "description": "Josh's local plugin marketplace.",
   "plugins": [
     {
       "name": "worktree-nm-pool",
