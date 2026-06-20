@@ -216,9 +216,16 @@ def cmd_install(args):
             out("no-op (matches %s)" % h)
             return 0
         if existing and existing != h:
-            # Valid but stale: return it to the pool for reuse.
-            dest = return_to_pool(nm, pool, existing)
-            out("returned stale node_modules to pool (%s)" % os.path.basename(dest))
+            # Lockfile drifted under an existing install (pull/merge/bump).
+            # Reconcile in place — bun/pnpm/yarn evolve incrementally; npm ci
+            # reinstalls — then re-stamp. The pool is for handing whole trees
+            # between worktrees, not for in-place mutation, so it stays out.
+            pm = install_cmd[0]
+            out("lockfile changed (%s -> %s) -> %s install in place"
+                % (existing, h, pm))
+            run_install(wt, install_cmd, h)
+            write_sentinel(nm, h)
+            return 0
         else:
             # Dirty / no sentinel: discard.
             _rmtree(nm)

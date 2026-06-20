@@ -23,7 +23,6 @@ nmpool uninstall --worktree /path/to/worktree
   miss runs the lockfile's frozen install once. Idempotent: a no-op when
   `node_modules` already matches the lockfile.
 - `uninstall` returns the dir to the cache for the next worktree to reuse.
-- Switched branches / the lockfile changed? Just re-run `nmpool install`.
 
 ## Invoking nmpool
 
