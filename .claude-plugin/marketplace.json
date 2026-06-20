@@ -3,7 +3,7 @@
   "owner": {
     "name": "Josh Gruenberg"
   },
-  "description": "Josh's local plugin marketplace.",
+  "description": "plugins by joshng",
   "plugins": [
     {
       "name": "worktree-nm-pool",
