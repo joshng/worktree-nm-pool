@@ -1,22 +1,24 @@
 ---
 name: worktree-nm-pool
-description: Set up node_modules in a git worktree efficiently using a cache. Use when creating/deleting worktrees in a project that uses bun/npm/pnpm/yarn
+description: Set up or save a git worktree's node_modules via a cache. Use BEFORE running `git worktree add` or `git worktree remove` in a bun/npm/pnpm/yarn project
 ---
 
 # worktree-nm-pool
 
 ## Invariant (non-negotiable)
 
-**NEVER symlink `node_modules` or run bun/npm/pnpm/yarn install in a git worktree.** Run `nmpool install`.
+- **NEVER symlink `node_modules` or run bun/npm/pnpm/yarn install in a worktree** — run `nmpool install`.
+- **NEVER `git worktree remove` before running `nmpool uninstall`** — it discards the pooled `node_modules`, forcing a full reinstall next time.
 
 ## Workflow
 
 ```bash
-# Right after creating a worktree:
+# After adding a worktree:
 nmpool install --worktree /path/to/worktree     # or omit --worktree when CWD is inside it
 
-# Right before removing a worktree:
+# Before removing a worktree — run FIRST, then remove:
 nmpool uninstall --worktree /path/to/worktree
+git worktree remove /path/to/worktree
 ```
 
 - `install` provisions a real `node_modules` — a cache hit is an instant move; a
