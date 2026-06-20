@@ -1,0 +1,14 @@
+{
+  "name": "worktree-nm-pool-plugins",
+  "owner": {
+    "name": "Josh Gruenberg"
+  },
+  "description": "Local marketplace for the worktree-nm-pool plugin.",
+  "plugins": [
+    {
+      "name": "worktree-nm-pool",
+      "source": "./",
+      "description": "Pools git-worktree node_modules directories: worktrees get a real node_modules via O(1) atomic moves keyed by lockfile hash, instead of re-installing 1-2 GB per worktree."
+    }
+  ]
+}
