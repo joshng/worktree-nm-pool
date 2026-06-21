@@ -72,13 +72,17 @@ Resolved **env var → config file → default**, where the config file is
 - `.claude-plugin/plugin.json` — manifest.
 - `hooks/hooks.json` — registers `WorktreeCreate` and `WorktreeRemove` (neither
   event takes a matcher).
-  - **`WorktreeCreate`** → `hooks/on-worktree-create.sh`: best-effort
-    `nmpool install`, then **echoes the worktree path and exits 0**. This is
-    required — `WorktreeCreate` blocks creation on *any* non-zero exit, so the
-    hook never fails the build just because deps didn't install; lazy-ensure
+  - **`WorktreeCreate`** → `hooks/on-worktree-create.sh`: this event *replaces
+    git's default creation*, so the hook **owns it** — it runs `git worktree
+    add` (new or existing branch, from `worktree_path`/`branch_name`/`base_path`
+    in the hook's JSON stdin), then best-effort `nmpool install`, then prints the
+    worktree path and exits 0. Only a failed `git worktree add` exits non-zero
+    (which blocks creation); a failed install is non-blocking — lazy-ensure
     backfills later.
-  - **`WorktreeRemove`** → `hooks/on-worktree-remove.sh`: best-effort
-    `nmpool uninstall` (post-event; exit code ignored).
+  - **`WorktreeRemove`** → `hooks/on-worktree-remove.sh`: a *side-effect* hook.
+    For git, Claude removes the worktree itself, so this only runs best-effort
+    `nmpool uninstall` to rescue `node_modules` into the pool (exit code
+    ignored).
 - `skills/worktree-nm-pool/SKILL.md` — model-invoked guidance.
 
 Hook scripts resolve the tool via `${CLAUDE_PLUGIN_ROOT}/bin/nmpool`, falling

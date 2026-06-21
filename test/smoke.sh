@@ -145,6 +145,53 @@ HASH3="$(python3 -c "import hashlib; print(hashlib.sha256(open('$REPO/package-lo
 entry10="$(ls -d "$ALTPOOL"/node_modules_"$HASH3"_* 2>/dev/null | head -1 || true)"
 [ -n "$entry10" ]; check "pool entry created under config cacheDir" $?
 
+# ---------------------------------------------------------------------------
+# Hook scripts: WorktreeCreate owns creation; WorktreeRemove is a side-effect.
+# ---------------------------------------------------------------------------
+CREATE="$HERE/../hooks/on-worktree-create.sh"
+REMOVE="$HERE/../hooks/on-worktree-remove.sh"
+
+HREPO="$TMP/hookrepo"; mkdir -p "$HREPO"
+git -C "$HREPO" init -q
+git -C "$HREPO" config user.email t@t
+git -C "$HREPO" config user.name t
+echo '{"name":"x"}' > "$HREPO/package.json"
+echo '{"lockfileVersion":3,"v":1}' > "$HREPO/package-lock.json"
+git -C "$HREPO" add -A
+git -C "$HREPO" commit -qm init
+HHASH="$(python3 -c "import hashlib; print(hashlib.sha256(open('$HREPO/package-lock.json','rb').read()).hexdigest()[:16])")"
+
+mkjson() { python3 -c "import json,sys; print(json.dumps(dict(a.split('=',1) for a in sys.argv[1:])))" "$@"; }
+
+echo "== case 11: WorktreeCreate hook creates the worktree + provisions deps (new branch) =="
+WT="$TMP/hookwt/feat-a"
+out11="$(mkjson "worktree_path=$WT" "branch_name=feat-a" "base_path=$HREPO" | bash "$CREATE")"
+echo "    stdout -> $out11"
+[ "$out11" = "$WT" ]; check "hook prints the worktree path on stdout" $?
+[ "$(git -C "$WT" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]; check "worktree is a real git worktree" $?
+[ "$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "feat-a" ]; check "worktree on new branch feat-a" $?
+[ -d "$WT/node_modules" ] && [ ! -L "$WT/node_modules" ]; check "node_modules provisioned (real dir)" $?
+
+echo "== case 12: WorktreeCreate hook checks out an EXISTING branch =="
+git -C "$HREPO" branch feat-b
+WT2="$TMP/hookwt/feat-b"
+mkjson "worktree_path=$WT2" "branch_name=feat-b" "base_path=$HREPO" | bash "$CREATE" >/dev/null
+[ "$(git -C "$WT2" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "feat-b" ]; check "existing branch checked out in worktree" $?
+[ -d "$WT2/node_modules" ]; check "node_modules provisioned for existing-branch worktree" $?
+
+echo "== case 13: WorktreeCreate hook blocks (non-zero) when git worktree add fails =="
+set +e
+mkjson "worktree_path=$WT" "branch_name=feat-a" "base_path=$HREPO" >/dev/null 2>&1 \
+  && mkjson "worktree_path=$WT" "branch_name=feat-a" "base_path=$HREPO" | bash "$CREATE" >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ]; check "duplicate worktree path => non-zero exit (creation blocked)" $?
+
+echo "== case 14: WorktreeRemove hook returns node_modules to the pool (side-effect) =="
+mkjson "worktree_path=$WT" | bash "$REMOVE" >/dev/null 2>&1
+[ ! -e "$WT/node_modules" ]; check "remove hook moved node_modules out of the worktree" $?
+ls -d "$POOL"/node_modules_"$HHASH"_* >/dev/null 2>&1; check "node_modules now in the pool" $?
+
 echo
 echo "==== $pass passed, $fail failed ===="
 [ "$fail" -eq 0 ]
