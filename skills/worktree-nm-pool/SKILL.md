@@ -7,7 +7,8 @@ description: Set up or save a git worktree's node_modules via a cache. Use BEFOR
 
 ## Invariant (non-negotiable)
 
-- **NEVER symlink `node_modules` or run bun/npm/pnpm/yarn install in a worktree** — run `nmpool install`.
+- **To PROVISION a worktree's `node_modules`** (set it up to match the lockfile): run `nmpool install` — never a from-scratch `bun/npm/pnpm/yarn install`, never a symlink.
+- **To CHANGE dependencies** (`bun add`/`remove`, version bumps): use the package manager directly. `nmpool` only provisions the *existing* lockfile (frozen install), so it can't add deps and will report `no-op`. After the change, run `nmpool install` to re-stamp the cache.
 - **NEVER `git worktree remove` before running `nmpool uninstall`** — it discards the pooled `node_modules`, forcing a full reinstall next time.
 
 ## Workflow
