@@ -70,23 +70,22 @@ Resolved **env var → config file → default**, where the config file is
 ## Plugin / hook auto-wiring
 
 - `.claude-plugin/plugin.json` — manifest.
-- `hooks/hooks.json` — registers `WorktreeCreate` and `WorktreeRemove` (neither
-  event takes a matcher).
-  - **`WorktreeCreate`** → `hooks/on-worktree-create.sh`: this event *replaces
-    git's default creation*, so the hook **owns it** — it runs `git worktree
-    add` (new or existing branch, from `worktree_path`/`branch_name`/`base_path`
-    in the hook's JSON stdin), then best-effort `nmpool install`, then prints the
-    worktree path and exits 0. Only a failed `git worktree add` exits non-zero
-    (which blocks creation); a failed install is non-blocking — lazy-ensure
-    backfills later.
-  - **`WorktreeRemove`** → `hooks/on-worktree-remove.sh`: a *side-effect* hook.
-    For git, Claude removes the worktree itself, so this only runs best-effort
-    `nmpool uninstall` to rescue `node_modules` into the pool (exit code
-    ignored).
+- `hooks/hooks.json` — registers **only** `WorktreeRemove`.
+  - **`WorktreeRemove`** → `hooks/on-worktree-remove.sh`: a *side-effect* hook
+    (no decision control). For git, Claude removes the worktree itself via
+    `git worktree remove`; this hook just runs best-effort `nmpool uninstall`
+    (reading `worktree_path` from the JSON stdin) to rescue `node_modules` into
+    the pool first. Exit code is ignored.
+  - **No `WorktreeCreate` hook — on purpose.** That event *replaces* git's
+    native worktree creation entirely (it exists for non-git VCS like SVN) and
+    disables `.worktreeinclude`. A git tool must not own creation, so nmpool
+    lets Claude create worktrees natively. Provisioning on creation is therefore
+    not auto-wired — run `nmpool install` (the skill prompts this), or rely on
+    lazy-ensure.
 - `skills/worktree-nm-pool/SKILL.md` — model-invoked guidance.
 
-Hook scripts resolve the tool via `${CLAUDE_PLUGIN_ROOT}/bin/nmpool`, falling
-back to a path relative to the script's own location.
+The remove hook resolves the tool via `${CLAUDE_PLUGIN_ROOT}/bin/nmpool`,
+falling back to a path relative to the script's own location.
 
 ## Install
 

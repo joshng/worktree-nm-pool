@@ -32,10 +32,10 @@ When this plugin is enabled, `nmpool` is on the Bash tool's PATH — call it
 directly. Otherwise run it by path: `python3 <plugin-root>/bin/nmpool ...`.
 `nmpool --help` documents the rest.
 
-## Automatic wiring (optional)
+## Automatic wiring (partial)
 
-*If* this plugin's hooks are active, claude-managed worktree create/remove run
-`nmpool install` / `nmpool uninstall` for you automatically (best-effort;
-creation is never blocked if an install fails). In that case you usually don't
-need to do anything — but running `nmpool install` yourself is always a safe
-no-op.
+*If* this plugin's hooks are active, claude-managed worktree **removal** runs
+`nmpool uninstall` for you automatically (best-effort side-effect). There is no
+create hook — provisioning is **not** automatic, so still run `nmpool install`
+yourself after a worktree is created (it's idempotent — a safe no-op if already
+provisioned).

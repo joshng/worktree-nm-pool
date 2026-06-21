@@ -1,16 +1,5 @@
 {
   "hooks": {
-    "WorktreeCreate": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/on-worktree-create.sh",
-            "statusMessage": "Provisioning node_modules from pool..."
-          }
-        ]
-      }
-    ],
     "WorktreeRemove": [
       {
         "hooks": [
